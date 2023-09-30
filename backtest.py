@@ -1,105 +1,142 @@
 import os
-
-from datetime import timedelta
+import copy
 
 from datamgr.datamgr import DataManager
-from datamgr.interval_conf import interval_deltas
 
-class BackTest:
-    def __init__(self, tickers, intervals=None, force_update=False, root_dir='.'):
-        self.root = root_dir
 
-        if intervals is None:
-            intervals = ['1d', '1w', '1M']
+class Backtest:
+    def __init__(self, tickers, sz_acc_list, cache_dir):
+        self.tickers = tickers
+        self.cache_dir = os.path.abspath(cache_dir)
 
-        self.dm = DataManager(root_dir=os.path.join(self.root, 'datamgr'))
-        self.dm.update(tickers, force_update=force_update, verbose=True)
+        self.dm = DataManager(cache_dir)
+
+        # Update data
+        print('─────────────── Update Data ───────────────')
+        self.dm.update(tickers, force_update=False, verbose=True)
         print()
-        self.dm.update_acc(tickers, intervals=intervals, force_update=force_update, verbose=True)
+        print('─────────────── Update Acc Data ───────────────')
+        self.dm.acc_update(tickers, sz_acc_list, force_update=False, verbose=True)
 
-        self.data = dict()
-        for ticker in tickers:
-            data_buf = self.dm.get(ticker, acc=True)
-            self.data[ticker] = data_buf
-        self.__match_data()
+        # Get and match date
+        self.data = self.dm.get(tickers, acc=True)
+        self.dm.match_date(self.data)
 
-    def __match_data(self):
-        datas = []
-        for ticker in list(self.data.keys()):
-            for interval in list(self.data[ticker].keys()):
-                datas.append(self.data[ticker][interval])
-        self.dm.match(datas)
+    def create_sim(self, sz_base):
+        return Backtest.Simulation(self, sz_base)
 
-        idx = 0
-        for ticker in list(self.data.keys()):
-            for interval in list(self.data[ticker].keys()):
-                self.data[ticker][interval] = datas[idx]
-                idx += 1
+    class Balance:
+        def __init__(self, sim):
+            self.sim = sim
+            self.cash = 0
+            self.stock = dict()
 
-    def get_tickers(self):
-        return list(self.data.keys())
+        def add_cash(self, cash_amount):
+            self.cash += cash_amount
 
-    def get_data_datetime_range(self):
-        if len(self.data) == 0:
-            return None, None
-
-        sample_ticker = self.get_tickers()[0]
-        sample_interval = list(self.data[sample_ticker].keys())[0]
-        sample_data = self.data[sample_ticker][sample_interval]
-
-        return sample_data.index[0], sample_data.index[-1]
-
-    def new_sim(self, st_tm=None, en_tm=None, sz_step=timedelta(minutes=1)):
-        datetime_rng = self.get_data_datetime_range()
-
-        if st_tm is None:
-            st_tm = datetime_rng[0]
-
-        if en_tm is None:
-            en_tm = datetime_rng[1]
-
-        sim = self.Simulator(self, st_tm, en_tm, sz_step)
-        return sim
-
-    class Simulator:
-        def __init__(self, parent, st_tm, en_tm, sz_step):
-            self.parent = parent
-            self.data = parent.data
-            self.curr_tm = st_tm
-            self.en_tm = en_tm
-            self.sz_step = sz_step
-
-        def get_tickers(self):
-            return list(self.parent.data.keys())
-
-        def get_data_datetime_range(self):
-            return self.parent.get_data_datetime_range()
-
-        def step(self, sz_step=None):
-            if sz_step is not None:
-                sz_step = self.sz_step
-
-            if self.curr_tm + sz_step > self.en_tm:
+        def add_stock(self, ticker, qty, price_pos):
+            price = self.sim.get_curr_price(ticker, price_pos)
+            if self.cash < price:
                 return False
 
-            self.curr_tm += sz_step
+            self.cash -= price * qty
+
+            # Add new stock
+            if ticker not in self.stock.keys():
+                self.stock[ticker] = 0
+
+            self.stock[ticker] += qty
             return True
 
-        def get_status(self):
+        def rm_stock(self, ticker, qty, price_pos):
+            if ticker not in self.stock.keys():
+                return False
+
+            if self.stock[ticker] < qty:
+                return False
+
+            price = self.sim.get_curr_price(ticker, price_pos)
+            self.cash += price * qty
+            self.stock[ticker] -= qty
+
+            if self.stock[ticker] == 0:
+                del self.stock[ticker]
+
+            return True
+
+        def get_curr_balance(self, price_pos):
+            res = 0
+            res += self.cash
+
+            for ticker in list(self.stock.keys()):
+                res += self.sim.get_curr_price(ticker, price_pos)
+
+            return res
+
+    class Simulation:
+        def __init__(self, parent, sz_base):
+            self.parent = parent
+            self.data = self.parent.data
+            self.sz_base = sz_base
+            self.date_range = DataManager.get_datetime_range(self.parent.data)
+
+            self.balance = Backtest.Balance(self)
+            self.balance_hist = []
+
+            self.curr_idx = 0
+
+        def get_state(self):
             pass
+
+        def buy(self, ticker, qty, price_pos):
+            return self.balance.add_stock(ticker, qty, price_pos)
+
+        def sell(self, ticker, qty, price_pos):
+            return self.balance.rm_stock(ticker, qty, price_pos)
+
+        def add_cash(self, cash_amount):
+            self.balance.add_cash(cash_amount)
+
+        def get_balance(self):
+            return self.balance
+
+        def step(self):
+            if self.curr_idx == self.get_data_len() - 1:
+                return False
+
+            self.curr_idx += 1
+            self.balance_hist.append(copy.deepcopy(self.balance))
+            return True
+
+        def set_curr_idx(self, idx):
+            if idx >= self.get_data_len():
+                return False
+
+            self.curr_idx = idx
+            return True
+
+        def get_statistics(self):
+            pass
+
+        def get_data_len(self):
+            ticker = list(self.data.keys())[0]
+            return len(self.data[ticker][self.sz_base].index)
+
+        def get_curr_datetime(self):
+            ticker = list(self.data.keys())[0]
+            return self.data[ticker][self.sz_base].index[self.curr_idx]
+
+        def get_curr_price(self, ticker, price_pos):
+            price = self.data[ticker][self.sz_base][price_pos].iloc[[self.curr_idx]]
+            return round(price, 4)
 
 
 def test():
     tickers = ['^IXIC', 'QQQ', 'QLD', 'TQQQ', 'PSQ', 'QID']
-
-    bt = BackTest(tickers, force_update=False)
-    print()
-    datetime_rng = bt.get_data_datetime_range()
-    print('Datetime Range : {}, {}'.format(datetime_rng[0], datetime_rng[1]))
-    print('Tickers :', bt.get_tickers())
-
-    sim1 = bt.new_sim(st_tm=datetime_rng[0], en_tm=datetime_rng[1],
-                      sz_step=interval_deltas['1m'])
+    bt = Backtest(tickers, [1, 5, 30], './datamgr/cache')
+    sim = bt.create_sim(sz_base=1)
+    print(sim.get_data_len())
+    print(sim.get_curr_datetime())
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ class DataManager:
     def __init__(self, cache_path):
         self.cache_path = os.path.abspath(cache_path)
 
-    def update(self, tickers, force_update=False, update_freq=80000, verbose=True):
+    def update(self, tickers, force_update=False, update_freq=80000, verbose=False):
         if type(tickers) is str:
             tickers = [tickers]
 
@@ -147,6 +147,34 @@ class DataManager:
 
         return res
 
+    @staticmethod
+    def match_date(datas):
+        data_buf = []
+        for ticker in list(datas.keys()):
+            for sz_acc in list(datas[ticker].keys()):
+                data_buf.append(datas[ticker][sz_acc])
+
+        if len(data_buf) <= 1:
+            return
+
+        intersect_index = set(data_buf[0].index)
+        for data in data_buf[1:]:
+            intersect_index = intersect_index.intersection(set(data.index))
+
+        for i in range(len(data_buf)):
+            cmp_idx = list(set(data_buf[i].index) - intersect_index)
+            for idx in cmp_idx:
+                data_buf[i].drop(idx, inplace=True)
+
+    @staticmethod
+    def get_datetime_range(data):
+        if type(data) is dict:
+            ticker = list(data.keys())[0]
+            sz_acc = list(data[ticker].keys())[0]
+            data = data[ticker][sz_acc]
+
+        return data.index[0], data.index[-1]
+
 
 def test():
     dm = DataManager('./cache')
@@ -155,6 +183,9 @@ def test():
     dm.update(tickers, verbose=True)
     print()
     dm.acc_update(tickers, sz_acc_list=[1, 5, 30], verbose=True)
+    acc = dm.get('QQQ', acc=True)
+    dm.match_date(acc)
+    print(acc)
 
 
 if __name__ == '__main__':
